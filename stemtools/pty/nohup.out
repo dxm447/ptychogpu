@@ -1,5 +1,0 @@
-15.25007975101471
-Traceback (most recent call last):
-  File "t2_mpi.py", line 4, in <module>
-    from mpi4py import MPI
-ModuleNotFoundError: No module named 'mpi4py'
