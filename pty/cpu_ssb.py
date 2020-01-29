@@ -286,35 +286,37 @@ def get_G_matrix(data4D):
     return data4D
 
 @numba.jit
-def get_square(x,y,sq):
-    sq = ((x**2) + (y**2))**0.5
-    
-@numba.jit
-def lobe_calc(Left_Lobe,RightLobe,Four_Y,Four_X,FourXY,rsize,cutoff):
+def lobe_calc(data4D,Four_Y,Four_X,FourXY,rsize,cutoff):
+    left_image = np.zeros_like(FourXY,dtype=np.complex64)
+    rightimage = np.zeros_like(FourXY,dtype=np.complex64)
     d_zero = np.copy(FourXY)
+    logical_dzero = d_zero < cutoff
     for pp in range(len(rsize)):
         ii,jj = rsize[pp,:]
         xq = Four_X[ii,jj]
         yq = Four_Y[ii,jj]
+        
+        cbd = data4D[:,:,ii,jj]
+        cbd_phase = np.arctan2(np.imag(cbd),np.real(cbd))
+        cbd_ampli = ((np.imag(cbd)**2) + (np.real(cbd)**2))**0.5
 
-        d_plus = np.zeros_like(Four_X)
-        get_square((Four_X + xq),(Four_Y + yq),d_plus)
+        d_plus = (((Four_X + xq)**2) + ((Four_Y + yq)**2))**0.5
+        d_minu = (((Four_X - xq)**2) + ((Four_Y - yq)**2))**0.5
 
-        d_minu = np.zeros_like(Four_Y)
-        get_square((Four_X - xq),(Four_Y - yq),d_minu)
+        ll = np.logical_and((d_plus < cutoff),(d_minu > cutoff))
+        ll = np.logical_and(ll,logical_dzero)
 
-        ll = Left_Lobe[:,:,ii,jj]
-        ll[d_plus < cutoff] = True
-        ll[d_minu > cutoff] = True
-        ll[d_zero < cutoff] = True
-        Left_Lobe[:,:,ii,jj] = ll
-
-        rr = RightLobe[:,:,ii,jj]
-        rr[d_plus > cutoff] = True
-        rr[d_minu < cutoff] = True
-        rr[d_zero < cutoff] = True
-        RightLobe[:,:,ii,jj] = rr
-
+        rr = np.logical_and((d_plus > cutoff),(d_minu < cutoff))
+        rr = np.logical_and(rr,logical_dzero)
+        
+        left_trotter = np.multiply(cbd_ampli[ll],np.exp((1j)*cbd_phase[ll]))
+        righttrotter = np.multiply(cbd_ampli[rr],np.exp((1j)*cbd_phase[rr]))
+        
+        left_image[ii,jj] = np.sum(left_trotter)
+        rightimage[ii,jj] = np.sum(righttrotter)
+    
+    return left_image,rightimage
+    
 def ssb_kernel(processed4D,real_calibration,aperture,voltage):
     data_size = np.asarray(processed4D.shape)
     wavelength = wavelength_pm(voltage)
@@ -330,13 +332,12 @@ def ssb_kernel(processed4D,real_calibration,aperture,voltage):
     rsize[:,0] = np.ravel(yy)
     rsize[:,1] = np.ravel(xx)
     
-    #pass to JIT kernel
-    lobe_calc(Left_Lobe,RightLobe,Four_Y,Four_X,FourXY,rsize,cutoff)
-    data_phase = np.arctan(np.imag(processed4D)/np.real(processed4D))
-    data_ampli = ((np.imag(processed4D) ** 2) + (np.real(processed4D) ** 2)) ** 0.5
-    left_trotter = np.multiply(data_ampli[Left_Lobe],np.exp((1j)*data_phase[Left_Lobe]))
-    left_image = np.fft.ifft2(np.sum(left_trotter,axis=-1))
-    righttrotter = np.multiply(data_ampli[RightLobe],np.exp((1j)*data_phase[RightLobe]))
-    rightimage = np.fft.ifft2(np.sum(righttrotter,axis=-1))
+    #initialize JIT
+    left_image,rightimage = lobe_calc(processed4D,Four_Y,Four_X,FourXY,rsize[0:50,:],cutoff)
     
-    return left_image,right_image
+    #pass to JIT kernel
+    left_image,rightimage = lobe_calc(processed4D,Four_Y,Four_X,FourXY,rsize,cutoff)
+    left_image = np.fft.ifftshift(np.fft.ifft2(left_image))
+    rightimage = np.fft.ifftshift(np.fft.ifft2(rightimage))
+    
+    return left_image,rightimage
