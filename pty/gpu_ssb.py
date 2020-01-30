@@ -1,23 +1,44 @@
 import numpy as np
-import numexpr as ne
-import numba
-from scipy import optimize as sio
+import scipy as sp
+import warnings
 from scipy import ndimage as scnd
+import math
+from scipy import optimize as sio
+import numexpr as ne
+import cupy as cp
+import cupyx.scipy.ndimage as csnd
+import numba
 
-def get_flat_dpc(data4D_flat,centered=True):
+def get_flat_dpc(data4D_flat,
+                 chunks=8,
+                 centered=True):
+    stops = np.zeros(chunks+1,dtype=np.int)
+    stops[0:chunks] = np.arange(0,data4D_flat.shape[0],(data4D_flat.shape[0]/chunks))
+    stops[chunks] = data4D_flat.shape[0]
     if centered:
-        beam_x = data4D_flat.shape[1]
-        beam_y = data4D_flat.shape[0]
+        cent_x = cp.asarray(data4D_flat.shape[2])/2
+        cent_y = cp.asarray(data4D_flat.shape[1])/2
     else:
         CentralDisk = np.median(data4D_flat,axis=0)
-        beam_x,beam_y,_ = st.util.sobel_circle(CentralDisk)
-    yy, xx = np.mgrid[0:data4D_flat.shape[1],0:data4D_flat.shape[2]]
-    FlatSum = np.sum(data4D_flat,axis=(-1,-2))
-    FlatY = np.multiply(data4D_flat,yy)
-    FlatX = np.multiply(data4D_flat,xx)
-    YCom = (np.sum(FlatY,axis=(-1,-2))/FlatSum) - beam_x
-    XCom = (np.sum(FlatX,axis=(-1,-2))/FlatSum) - beam_y
-    return XCom,YCom
+        cent_x,cent_y,_ = st.util.sobel_circle(CentralDisk)
+        cent_x = cp.asarray(cent_x)
+        cent_y = cp.asarray(cent_y)
+    yy, xx = cp.mgrid[0:data4D_flat.shape[1],0:data4D_flat.shape[2]]
+    FlatSum = cp.asarray(np.sum(data4D_flat,axis=(-1,-2)))
+    YCom_CPU = np.zeros(data4D_flat.shape[0],dtype=data4D_flat.dtype)
+    XCom_CPU = np.zeros(data4D_flat.shape[0],dtype=data4D_flat.dtype)
+    for ii in range(chunks):
+        startval = stops[ii]
+        stop_val = stops[ii+1]
+        gpu_4Dchunk = cp.asarray(data4D_flat[startval:stop_val,:,:])
+        FlatY = cp.multiply(gpu_4Dchunk,yy)
+        FlatX = cp.multiply(gpu_4Dchunk,xx)
+        YCom = (cp.sum(FlatY,axis=(-1,-2))/FlatSum[startval:stop_val]) - cent_y
+        XCom = (cp.sum(FlatX,axis=(-1,-2))/FlatSum[startval:stop_val]) - cent_x
+        YCom_CPU[startval:stop_val] = cp.asnumpy(YCom)
+        XCom_CPU[startval:stop_val] = cp.asnumpy(XCom)
+    del YCom, XCom, gpu_4Dchunk, cent_x, cent_y, FlatSum
+    return YCom_CPU,XCom_CPU
 
 def cart2pol(x, y):
     rho = ne.evaluate("((x**2) + (y**2)) ** 0.5")
@@ -36,36 +57,23 @@ def angle_fun(angle,rho_dpc,phi_dpc):
     return angle_sum
 
 def optimize_angle(x_dpc,y_dpc,adf_stem):
-    flips = np.zeros(4,dtype=bool)
-    flips[2:4] = True
-    chg_sums = np.zeros(4,dtype=x_dpc.dtype)
-    angles = np.zeros(4,dtype=x_dpc.dtype)
+    chg_sums = np.zeros(2,dtype=x_dpc.dtype)
+    angles = np.zeros(2,dtype=x_dpc.dtype)
     x0 = 90
-    for ii in range(2):
-        to_flip = flips[2*ii]
-        if to_flip:
-            xdpcf = np.flip(x_dpc)
-        else:
-            xdpcf = x_dpc
-        rho_dpc,phi_dpc = cart2pol(xdpcf,y_dpc)
-        x = sio.minimize(angle_fun,x0,args=(rho_dpc,phi_dpc))
-        min_x = x.x
-        sol1 = min_x - 90
-        sol2 = min_x + 90
-        chg_sums[int(2*ii)] = np.sum(charge_dpc(xdpcf,y_dpc,sol1)*adf_stem)
-        chg_sums[int(2*ii+1)] = np.sum(charge_dpc(xdpcf,y_dpc,sol2)*adf_stem)
-        angles[int(2*ii)] = sol1
-        angles[int(2*ii+1)] = sol2
+    rho_dpc,phi_dpc = cart2pol(x_dpc,y_dpc)
+    x = sio.minimize(angle_fun,x0,args=(rho_dpc,phi_dpc))
+    min_x = x.x
+    sol1 = min_x - 90
+    sol2 = min_x + 90
+    chg_sums[0] = np.sum(charge_dpc(x_dpc,y_dpc,sol1)*adf_stem)
+    chg_sums[1] = np.sum(charge_dpc(x_dpc,y_dpc,sol2)*adf_stem)
+    angles[0] = sol1
+    angles[1] = sol2
     angle = angles[chg_sums==np.amin(chg_sums)][0]
-    final_flip = flips[chg_sums==np.amin(chg_sums)][0]
-    return angle, final_flip
+    return angle
 
-def corrected_dpc(x_dpc,y_dpc,angle,flipper):
-    if flipper:
-        xdpcf = np.fliplr(x_dpc)
-    else:
-        xdpcf = np.copy(x_dpc)
-    rho_dpc,phi_dpc = cart2pol(xdpcf,y_dpc)
+def corrected_dpc(x_dpc,y_dpc,angle):
+    rho_dpc,phi_dpc = cart2pol(x_dpc,y_dpc)
     x_dpc2,y_dpc2 = pol2cart(rho_dpc,(phi_dpc + (angle*((np.pi)/180))))
     return x_dpc2,y_dpc2
 
@@ -128,16 +136,28 @@ def integrate_dpc(xshift,
 
 def centerCBED(data4D_flat,
                x_cen,
-               y_cen):
+               y_cen,
+               chunks=8):
+    stops = np.zeros(chunks+1,dtype=np.int)
+    stops[0:chunks] = np.arange(0,data4D_flat.shape[0],(data4D_flat.shape[0]/chunks))
+    stops[chunks] = data4D_flat.shape[0]
+    max_size = int(np.amax(np.diff(stops)))
+    centered4D = np.zeros_like(data4D_flat)
     image_size = np.asarray(data4D_flat.shape[1:3])
-    fourier_cal_y = (np.linspace((-image_size[0]/2), ((image_size[0]/2) - 1), image_size[0]))/image_size[0]
-    fourier_cal_x = (np.linspace((-image_size[1]/2), ((image_size[1]/2) - 1), image_size[1]))/image_size[1]
-    [fourier_mesh_x, fourier_mesh_y] = np.meshgrid(fourier_cal_x, fourier_cal_y)
+    fourier_cal_y = (cp.linspace((-image_size[0]/2), ((image_size[0]/2) - 1), image_size[0]))/image_size[0]
+    fourier_cal_x = (cp.linspace((-image_size[1]/2), ((image_size[1]/2) - 1), image_size[1]))/image_size[1]
+    [fourier_mesh_x, fourier_mesh_y] = cp.meshgrid(fourier_cal_x, fourier_cal_y)
     move_pixels = np.flip(image_size/2) - np.asarray((x_cen,y_cen))
-    move_phase = np.exp((-2) * np.pi * 1j * ((fourier_mesh_x*move_pixels[0]) + (fourier_mesh_y*move_pixels[1])))
-    FFT_4D = np.fft.fftshift(np.fft.fft2(data4D_flat,axes=(-1,-2)),axes=(-1,-2))
-    moved_in_fourier = np.abs(np.fft.ifft2(np.multiply(FFT_4D,move_phase),axes=(-1,-2)))
-    return moved_in_fourier
+    move_phase = cp.exp((-2) * np.pi * 1j * ((fourier_mesh_x*move_pixels[0]) + (fourier_mesh_y*move_pixels[1])))
+    for ii in range(chunks):
+        startval = stops[ii]
+        stop_val = stops[ii+1]
+        gpu_4Dchunk = cp.asarray(data4D_flat[startval:stop_val,:,:])
+        FFT_4D = cp.fft.fftshift(cp.fft.fft2(gpu_4Dchunk,axes=(-1,-2)),axes=(-1,-2))
+        FFT_4Dmove = cp.absolute(cp.fft.ifft2(cp.multiply(FFT_4D,move_phase),axes=(-1,-2)))
+        centered4D[startval:stop_val,:,:] = cp.asnumpy(FFT_4Dmove)
+    del FFT_4D,gpu_4Dchunk,FFT_4Dmove,move_phase,fourier_cal_y,fourier_cal_x,fourier_mesh_x,fourier_mesh_y
+    return centered4D
 
 def wavelength_pm(voltage_kV):
     m = 9.109383 * (10 ** (-31))  # mass of an electron
@@ -255,83 +275,133 @@ def subpixel_pad2D(initial_array,final_size):
     padded_c = np.abs(np.fft.ifft2(np.multiply(padded_f,move_phase))) 
     return padded_c
 
-@numba.jit
-def subpixel_pad4D(data4D_flat,final_size,cut_radius):
+def subpixel_pad4D(data4D_flat,final_size,cut_radius,chunks=10):
+    stops = np.zeros(chunks+1,dtype=np.int)
+    stops[0:chunks] = np.arange(0,data4D_flat.shape[0],(data4D_flat.shape[0]/chunks))
+    stops[chunks] = data4D_flat.shape[0]
+    max_size = int(np.amax(np.diff(stops)))
+    
     final_size = (np.asarray(final_size)).astype(int)
+    move_pixels = cp.asarray(np.flip(0.5*(final_size - np.asarray(data4D_flat.shape[1:3]))))
+    
     yy,xx = np.mgrid[0:final_size[0],0:final_size[1]]
     rad = ((yy - final_size[0]/2)**2) + ((xx - final_size[1]/2)**2)
-    cutoff = (rad < ((1.1*cut_radius)**2)).astype(data4D_flat.dtype)
-    cbed = np.zeros(final_size,dtype=data4D_flat.dtype)
-    fourier_cal_y = (np.linspace((-final_size[0]/2), ((final_size[0]/2) - 1), final_size[0]))/final_size[0]
-    fourier_cal_x = (np.linspace((-final_size[1]/2), ((final_size[1]/2) - 1), final_size[1]))/final_size[1]
-    [fourier_mesh_x, fourier_mesh_y] = np.meshgrid(fourier_cal_x, fourier_cal_y)
-    move_pixels = np.flip(0.5*(final_size - np.asarray(data4D_flat.shape[1:3])))
-    move_phase = np.exp((-2) * np.pi * 1j * ((fourier_mesh_x*move_pixels[0]) + (fourier_mesh_y*move_pixels[1])))
+    cutoff = cp.asarray((rad < ((1.1*cut_radius)**2)).astype(data4D_flat.dtype))
+    
+    cbed = cp.zeros(final_size,dtype=data4D_flat.dtype)
+    
+    fourier_cal_y = (cp.linspace((-final_size[0]/2), ((final_size[0]/2) - 1), final_size[0]))/final_size[0]
+    fourier_cal_x = (cp.linspace((-final_size[1]/2), ((final_size[1]/2) - 1), final_size[1]))/final_size[1]
+    [fourier_mesh_x, fourier_mesh_y] = cp.meshgrid(fourier_cal_x, fourier_cal_y)
+    move_phase = cp.exp((-2) * np.pi * (1j) * ((fourier_mesh_x*move_pixels[0]) + (fourier_mesh_y*move_pixels[1])))
+    
     padded_4D = np.zeros((data4D_flat.shape[0],final_size[0],final_size[1]),dtype=data4D_flat.dtype)
-    for ii in range(data4D_flat.shape[0]):
-        cbed[:,:] = np.amin(data4D_flat[ii,:,:])
-        cbed[0:data4D_flat.shape[1],0:data4D_flat.shape[2]] = data4D_flat[ii,:,:]
-        FFT_cbd = np.fft.fftshift(np.fft.fft2(cbed))
-        moved_cbed = (np.abs(np.fft.ifft2(np.multiply(FFT_cbd,move_phase)))).astype(data4D_flat.dtype)
-        padded_4D[ii,:,:] = moved_cbed*cutoff
+    padded_on_gpu = cp.zeros((max_size,final_size[0],final_size[1]),dtype=data4D_flat.dtype)
+    for cc in range(chunks):
+        startval = stops[cc]
+        stop_val = stops[cc+1]
+        gpu_4Dchunk = cp.asarray(data4D_flat[startval:stop_val,:,:])
+        for ii in range(gpu_4Dchunk.shape[0]):
+            cbed[0:data4D_flat.shape[1],0:data4D_flat.shape[2]] = gpu_4Dchunk[ii,:,:]
+            FFT_cbd = cp.fft.fftshift(cp.fft.fft2(cbed))
+            moved_cbed = (cp.absolute(cp.fft.ifft2(cp.multiply(FFT_cbd,move_phase)))).astype(data4D_flat.dtype)
+            padded_on_gpu[ii,:,:] = moved_cbed*cutoff
+        padded_4D[startval:stop_val,:,:] = cp.asnumpy(padded_on_gpu[0:gpu_4Dchunk.shape[0],:,:])
+    del padded_on_gpu, moved_cbed, cbed, FFT_cbd, move_phase, gpu_4Dchunk, move_pixels, cutoff
     return padded_4D
 
-def get_G_matrix(data4D):
-    data4D = np.transpose(data4D,(2,3,0,1)) #real in 2,3 
-    data4D = np.fft.fftshift(np.fft.fft2(data4D,axes=(2,3)),axes=(2,3)) #now real is Q' which is 2,3
-    return data4D
+def gpu_rotator(data4D_flat,rotangle,axes,chunks=40):
+    stops = np.zeros(chunks+1,dtype=np.int)
+    stops[0:chunks] = np.arange(0,data4D_flat.shape[0],(data4D_flat.shape[0]/chunks))
+    stops[chunks] = data4D_flat.shape[0]
+    max_size = int(np.amax(np.diff(stops)))
+    data4D_rot = np.zeros_like(data4D_flat)
+    for cc in range(chunks):
+        startval = stops[cc]
+        stop_val = stops[cc+1]
+        gpu_4Dchunk = cp.asarray(data4D_flat[startval:stop_val,:,:])
+        data4D_rot[startval:stop_val,:,:] = cp.asnumpy(csnd.rotate(gpu_4Dchunk,rotangle,axes,reshape=False))
+    del gpu_4Dchunk
+    return data4D_rot
 
-@numba.jit
-def lobe_calc(data4D,Four_Y,Four_X,FourXY,rsize,cutoff):
-    left_image = np.zeros_like(FourXY,dtype=np.complex64)
-    rightimage = np.zeros_like(FourXY,dtype=np.complex64)
-    d_zero = np.copy(FourXY)
-    logical_dzero = d_zero < cutoff
-    for pp in range(len(rsize)):
-        ii,jj = rsize[pp,:]
-        xq = Four_X[ii,jj]
-        yq = Four_Y[ii,jj]
-        
-        cbd = data4D[:,:,ii,jj]
-        cbd_phase = np.angle(cbd)
-        cbd_ampli = np.abs(cbd)
+def get_G_matrix(data4D,chunks=20):
+    data4D = np.transpose(data4D,(2,3,0,1)) #real in 2,3
+    data_shape = data4D.shape
+    data4D = np.reshape(data4D,(data_shape[0]*data_shape[1],data_shape[2],data_shape[3]))
+    stops = np.zeros(chunks+1,dtype=np.int)
+    stops[0:chunks] = np.arange(0,data4D.shape[0],(data4D.shape[0]/chunks))
+    stops[chunks] = data4D.shape[0]
+    max_size = int(np.amax(np.diff(stops)))
+    data4DF = np.zeros_like(data4D,dtype=np.complex64)
+    for cc in range(chunks):
+        startval = stops[cc]
+        stop_val = stops[cc+1]
+        gpu_4Dchunk = cp.asarray(data4D[startval:stop_val,:,:])
+        gpu_4DF = cp.fft.fftshift(cp.fft.fft2(gpu_4Dchunk,axes=(1,2)),axes=(1,2)) #now real is Q' which is 2,3
+        data4DF[startval:stop_val,:,:] = cp.asnumpy(gpu_4DF)
+    del gpu_4Dchunk, gpu_4DF
+    data4DF = np.reshape(data4DF,data_shape)
+    return data4DF
 
-        d_plus = (((Four_X + xq)**2) + ((Four_Y + yq)**2))**0.5
-        d_minu = (((Four_X - xq)**2) + ((Four_Y - yq)**2))**0.5
-
-        ll = np.logical_and((d_plus < cutoff),(d_minu > cutoff))
-        ll = np.logical_and(ll,logical_dzero)
-
-        rr = np.logical_and((d_plus > cutoff),(d_minu < cutoff))
-        rr = np.logical_and(rr,logical_dzero)
-        
-        left_trotter = np.multiply(cbd_ampli[ll],np.exp((1j)*cbd_phase[ll]))
-        righttrotter = np.multiply(cbd_ampli[rr],np.exp((1j)*cbd_phase[rr]))
-        
-        left_image[ii,jj] = np.sum(left_trotter)
-        rightimage[ii,jj] = np.sum(righttrotter)
+def lobe_calc(data4DF,Four_Y,Four_X,FourXY,rsize,cutoff,chunks):
+    stops = np.zeros(chunks+1,dtype=np.int)
+    stops[0:chunks] = np.arange(0,data4DF.shape[-1],(data4DF.shape[-1]/chunks))
+    stops[chunks] = data4DF.shape[-1]
     
+    left_image = cp.zeros_like(FourXY,dtype=np.complex64)
+    rightimage = cp.zeros_like(FourXY,dtype=np.complex64)
+    d_zero = FourXY < cutoff
+    
+    for cc in range(chunks):
+        startval = stops[cc]
+        stop_val = stops[cc+1]
+        gpu_4Dchunk = cp.asarray(data4DF[:,:,startval:stop_val])
+        rcalc = rsize[startval:stop_val,:]
+        for pp in range(rcalc.shape[0]):
+            ii,jj = rcalc[pp,:]
+            xq = Four_X[ii,jj]
+            yq = Four_Y[ii,jj]
+
+            cbd = gpu_4Dchunk[:,:,pp]
+            cbd_phase = cp.angle(cbd)
+            cbd_ampli = cp.absolute(cbd)
+
+            d_plus = (((Four_X + xq)**2) + ((Four_Y + yq)**2))**0.5
+            d_minu = (((Four_X - xq)**2) + ((Four_Y - yq)**2))**0.5
+
+            ll = cp.logical_and((d_plus < cutoff),(d_minu > cutoff))
+            ll = cp.logical_and(ll,d_zero)
+
+            rr = cp.logical_and((d_plus > cutoff),(d_minu < cutoff))
+            rr = cp.logical_and(rr,d_zero)
+
+            left_trotter = cp.multiply(cbd_ampli[ll],cp.exp((1j)*cbd_phase[ll]))
+            righttrotter = cp.multiply(cbd_ampli[rr],cp.exp((1j)*cbd_phase[rr]))
+
+            left_image[ii,jj] = cp.sum(left_trotter)
+            rightimage[ii,jj] = cp.sum(righttrotter)
+    
+    del gpu_4Dchunk,d_plus,d_minu,ll,rr,left_trotter,righttrotter,cbd,cbd_phase,cbd_ampli,d_zero, rcalc
     return left_image,rightimage
     
-def ssb_kernel(processed4D,real_calibration,aperture,voltage):
+def ssb_kernel(processed4D,real_calibration,aperture,voltage,chunks=12):
     data_size = np.asarray(processed4D.shape)
+    processed4D = np.reshape(processed4D,(data_size[0],data_size[1],data_size[2]*data_size[3]))
     wavelength = wavelength_pm(voltage)
     cutoff = aperture/(1000*wavelength)
-    four_y = np.fft.fftshift(np.fft.fftfreq(data_size[0], real_calibration))
-    four_x = np.fft.fftshift(np.fft.fftfreq(data_size[1], real_calibration))
-    Four_X,Four_Y = np.meshgrid(four_x,four_y)
-    FourXY = np.sqrt((Four_Y ** 2) + (Four_X**2))
-    yy,xx = np.mgrid[0:data_size[0],0:data_size[1]]
-    rsize = np.zeros((np.size(yy),2),dtype=int)
-    rsize[:,0] = np.ravel(yy)
-    rsize[:,1] = np.ravel(xx)
+    four_y = cp.fft.fftshift(cp.fft.fftfreq(data_size[0], real_calibration))
+    four_x = cp.fft.fftshift(cp.fft.fftfreq(data_size[1], real_calibration))
+    Four_X,Four_Y = cp.meshgrid(four_x,four_y)
+    FourXY = cp.sqrt((Four_Y ** 2) + (Four_X**2))
+    yy,xx = cp.mgrid[0:data_size[0],0:data_size[1]]
+    rsize = cp.zeros((np.size(yy),2),dtype=int)
+    rsize[:,0] = cp.ravel(yy)
+    rsize[:,1] = cp.ravel(xx)
     
-    #initialize JIT
-    left_image,rightimage = lobe_calc(processed4D,Four_Y,Four_X,FourXY,rsize[0:100,:],cutoff)
+    left_imGPU,rightimGPU = lobe_calc(processed4D,Four_Y,Four_X,FourXY,rsize,cutoff,chunks)
+    left_image = cp.asnumpy(cp.fft.ifft2(left_imGPU))
+    rightimage = cp.asnumpy(cp.fft.ifft2(rightimGPU))
     
-    #pass to JIT kernel
-    left_image,rightimage = lobe_calc(processed4D,Four_Y,Four_X,FourXY,rsize,cutoff)
-    left_image = np.fft.ifft2(left_image)
-    rightimage = np.fft.ifft2(rightimage)
+    del four_y, four_x, Four_X, Four_Y, FourXY, yy, xx, rsize, left_imGPU, rightimGPU
     
     return left_image,rightimage
