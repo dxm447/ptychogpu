@@ -56,7 +56,7 @@ def optimize_angle(x_dpc,y_dpc,adf_stem):
         chg_sums[int(2*ii+1)] = np.sum(charge_dpc(xdpcf,y_dpc,sol2)*adf_stem)
         angles[int(2*ii)] = sol1
         angles[int(2*ii+1)] = sol2
-    angle = angles[chg_sums==np.amin(chg_sums)][0]
+    angle = (-1)*angles[chg_sums==np.amin(chg_sums)][0]
     final_flip = flips[chg_sums==np.amin(chg_sums)][0]
     return angle, final_flip
 
@@ -66,7 +66,7 @@ def corrected_dpc(x_dpc,y_dpc,angle,flipper):
     else:
         xdpcf = np.copy(x_dpc)
     rho_dpc,phi_dpc = cart2pol(xdpcf,y_dpc)
-    x_dpc2,y_dpc2 = pol2cart(rho_dpc,(phi_dpc + (angle*((np.pi)/180))))
+    x_dpc2,y_dpc2 = pol2cart(rho_dpc,(phi_dpc - (angle*((np.pi)/180))))
     return x_dpc2,y_dpc2
 
 def potential_dpc(x_dpc,y_dpc,angle=0):
