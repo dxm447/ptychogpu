@@ -4,19 +4,17 @@ import numba
 from scipy import optimize as sio
 from scipy import ndimage as scnd
 
-def get_flat_dpc(data4D_flat,centered=True):
-    if centered:
-        beam_x = data4D_flat.shape[1]
-        beam_y = data4D_flat.shape[0]
-    else:
-        CentralDisk = np.median(data4D_flat,axis=0)
-        beam_x,beam_y,_ = st.util.sobel_circle(CentralDisk)
+@numba.jit
+def get_flat_dpc(data4D_flat):
+    CentralDisk = np.mean(data4D_flat,axis=0)
+    beam_x,beam_y,_ = st.util.sobel_circle(CentralDisk)
     yy, xx = np.mgrid[0:data4D_flat.shape[1],0:data4D_flat.shape[2]]
-    FlatSum = np.sum(data4D_flat,axis=(-1,-2))
-    FlatY = np.multiply(data4D_flat,yy)
-    FlatX = np.multiply(data4D_flat,xx)
-    YCom = (np.sum(FlatY,axis=(-1,-2))/FlatSum) - beam_x
-    XCom = (np.sum(FlatX,axis=(-1,-2))/FlatSum) - beam_y
+    YCom = np.zeros(data4D_flat.shape[0],dtype=np.float)
+    XCom = np.zeros(data4D_flat.shape[0],dtype=np.float)
+    for ii in numba.prange(data4D_flat.shape[0]):
+        cbed = data4D_flat[ii,:,:]
+        YCom[ii] = (np.sum(np.multiply(yy,cbed))/np.sum(cbed)) - beam_y
+        XCom[ii] = (np.sum(np.multiply(xx,cbed))/np.sum(cbed)) - beam_x
     return XCom,YCom
 
 def cart2pol(x, y):
