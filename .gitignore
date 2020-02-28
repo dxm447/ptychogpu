@@ -12,6 +12,7 @@ notebooks/dask-worker-space/
 notebooks/.ipynb_checkpoints/
 pty/.ipynb_checkpoints/
 
+
 # Mac OSX folder files
 *.DS_Store
 
@@ -20,6 +21,7 @@ pty/.ipynb_checkpoints/
 *.out
 *.prof
 *.swp
+*.dirlock
 
 # Distribution / packaging
 .Python
