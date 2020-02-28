@@ -1,18 +1,8 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
-stemtools/__pycache__/
+pty/__pycache__/
 notebooks/__pycache__/
-stemtools/adf/__pycache__/
-stemtools/afit/__pycache__/
-stemtools/beam/__pycache__/
-stemtools/dpc/__pycache__/
-stemtools/eels/__pycache__/
-stemtools/nbed/__pycache__/
-stemtools/proc/__pycache__/
-stemtools/sim/__pycache__/
-stemtools/util/__pycache__/
-stemtools/dpc/__pycache__/
-stemtools/pty/__pycache__/
+notebooks/dask-worker-space/
 *.py[cod]
 *$py.class
 *.pyc
@@ -20,18 +10,7 @@ stemtools/pty/__pycache__/
 
 .ipynb_checkpoints/
 notebooks/.ipynb_checkpoints/
-stemtools/.ipynb_checkpoints/
-stemtools/adf/.ipynb_checkpoints/
-stemtools/afit/.ipynb_checkpoints/
-stemtools/beam/.ipynb_checkpoints/
-stemtools/dpc/.ipynb_checkpoints/
-stemtools/eels/.ipynb_checkpoints/
-stemtools/nbed/.ipynb_checkpoints/
-stemtools/proc/.ipynb_checkpoints/
-stemtools/sim/.ipynb_checkpoints/
-stemtools/util/.ipynb_checkpoints/
-stemtools/dpc/.ipynb_checkpoints/
-stemtools/pty/.ipynb_checkpoints/
+pty/.ipynb_checkpoints/
 
 # Mac OSX folder files
 *.DS_Store
