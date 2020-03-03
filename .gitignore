@@ -22,6 +22,7 @@ pty/.ipynb_checkpoints/
 *.prof
 *.swp
 *.dirlock
+*.lock
 
 # Distribution / packaging
 .Python
